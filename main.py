@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Any
 import base64
@@ -15,8 +16,17 @@ from collections import defaultdict
 
 app = FastAPI()
 
+# ── CORS — allows the UI (any origin) to call this service directly ──────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # ── Constants ────────────────────────────────────────────────────────────────
 TEMPLATE_URL = os.environ.get("TEMPLATE_URL", "")  # Set in Render env vars
+N8N_WEBHOOK_URL = os.environ.get("N8N_WEBHOOK_URL", "")  # Set in Render env vars
 DATE_FMT     = "mmm/dd/yyyy"
 BLUE_FILL    = PatternFill("solid", fgColor="1F4E79")
 WHITE_BOLD   = Font(bold=True, color="FFFFFF")
@@ -178,6 +188,31 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+@app.post("/trigger")
+async def trigger_workflow(file: UploadFile = File(...)):
+    """
+    Receives a PDF from the UI and forwards it to the n8n webhook.
+    Acts as a CORS-safe proxy — the UI never calls n8n directly.
+    """
+    if not N8N_WEBHOOK_URL:
+        raise HTTPException(500, "N8N_WEBHOOK_URL environment variable not set")
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are accepted")
+
+    pdf_bytes = await file.read()
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            N8N_WEBHOOK_URL,
+            files={"Investment_Statement": (file.filename, pdf_bytes, "application/pdf")},
+        )
+        if resp.status_code not in (200, 202):
+            raise HTTPException(502, f"n8n webhook returned {resp.status_code}")
+
+    return JSONResponse({"status": "received", "filename": file.filename})
+
 
 @app.post("/build-excel")
 async def build_excel_endpoint(req: BuildRequest):
