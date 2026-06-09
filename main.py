@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Any
@@ -192,8 +192,8 @@ def health():
 @app.post("/trigger")
 async def trigger_workflow(file: UploadFile = File(...)):
     """
-    Receives a PDF from the UI and forwards it to the n8n webhook.
-    Acts as a CORS-safe proxy — the UI never calls n8n directly.
+    Receives a PDF from the UI, forwards it to n8n, and streams
+    the populated Excel file back directly to the browser.
     """
     if not N8N_WEBHOOK_URL:
         raise HTTPException(500, "N8N_WEBHOOK_URL environment variable not set")
@@ -202,8 +202,9 @@ async def trigger_workflow(file: UploadFile = File(...)):
         raise HTTPException(400, "Only PDF files are accepted")
 
     pdf_bytes = await file.read()
+    xlsx_filename = file.filename.rsplit(".", 1)[0] + ".xlsx"
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         resp = await client.post(
             N8N_WEBHOOK_URL,
             files={"Investment_Statement": (file.filename, pdf_bytes, "application/pdf")},
@@ -211,7 +212,11 @@ async def trigger_workflow(file: UploadFile = File(...)):
         if resp.status_code not in (200, 202):
             raise HTTPException(502, f"n8n webhook returned {resp.status_code}")
 
-    return JSONResponse({"status": "received", "filename": file.filename})
+    return Response(
+        content=resp.content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=\"{xlsx_filename}\""}
+    )
 
 
 @app.post("/build-excel")
