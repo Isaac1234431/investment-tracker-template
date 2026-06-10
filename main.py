@@ -204,7 +204,7 @@ async def trigger_workflow(file: UploadFile = File(...)):
     pdf_bytes = await file.read()
     xlsx_filename = file.filename.rsplit(".", 1)[0] + ".xlsx"
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with httpx.AsyncClient(timeout=600.0) as client:
         resp = await client.post(
             N8N_WEBHOOK_URL,
             files={"Investment_Statement": (file.filename, pdf_bytes, "application/pdf")},
