@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Any
@@ -97,8 +97,8 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
     confirmed = [t for t in transactions if not t.get("is_pending")]
     pending   = [t for t in transactions if t.get("is_pending")]
 
-    # ── 1. Reference Template ────────────────────────────────────────────────
-    ref = wb["Reference Template"]
+    # ── 1. Transaction Glossary ──────────────────────────────────────────────
+    ref = wb["Transaction Glossary"]
 
     for r in range(5, 100):
         clear_row(ref, r, PEND_COLS)
@@ -155,30 +155,75 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         new_ws["R7"] = "=R5*R6"
 
     # Re-order sheets alphabetically
-    fixed = ["Summary", "Reference Template", "Individual Stock Template"]
+    fixed = ["Summary", "Transaction Glossary", "Individual Stock Template"]
     stock_tabs = sorted([s for s in wb.sheetnames if s not in fixed])
     for i, name in enumerate(fixed + stock_tabs):
         wb.move_sheet(name, offset=wb.sheetnames.index(name) - i)
 
     # ── 3. Summary sheet ─────────────────────────────────────────────────────
     summary = wb["Summary"]
-    for i, h in enumerate(sorted(holdings, key=lambda x: x.get("symbol",""))):
+
+    # Build opening-positions lookup keyed by symbol (upper)
+    opening_lookup = {}
+    for op in extract.get("opening_positions") or []:
+        sym = (op.get("symbol") or "").upper().strip()
+        if sym:
+            opening_lookup[sym] = op
+
+    sorted_holdings = sorted(holdings, key=lambda x: x.get("symbol", ""))
+    last_data_row = 4 + len(sorted_holdings) - 1  # used for reconciliation SUM range
+
+    for i, h in enumerate(sorted_holdings):
         r = 4 + i
-        ticker = h.get("symbol") or lookup.get((h.get("description","")).upper().strip(),"")
-        summary[f"C{r}"].value = h.get("description","")
+        ticker = h.get("symbol") or lookup.get((h.get("description", "")).upper().strip(), "")
+        ticker_upper = ticker.upper().strip()
+
+        # ── Section 1: Asset Identifier ──────────────────────────────────────
+        summary[f"C{r}"].value = h.get("description", "")
         summary[f"D{r}"].value = ticker
-        set_date(summary[f"E{r}"], parse_date(extract.get("statement_period_end")))
-        book = (h.get("cost_per_unit") or 0) * (h.get("quantity") or 0)
-        summary[f"G{r}"].value = book if h.get("cost_per_unit") else None
-        summary[f"H{r}"].value = h.get("quantity")
-        summary[f"I{r}"].value = h.get("cost_per_unit")
-        summary[f"S{r}"].value = book if h.get("cost_per_unit") else None
-        summary[f"T{r}"].value = h.get("quantity")
-        summary[f"U{r}"].value = h.get("cost_per_unit")
-        summary[f"W{r}"].value = h.get("market_price")
-        summary[f"X{r}"].value = h.get("market_value")
-        if h.get("market_value") is not None and h.get("cost_per_unit") is not None:
-            summary[f"Y{r}"].value = f"=X{r}-G{r}"
+        summary[f"E{r}"].value = h.get("currency", "")
+        summary[f"F{r}"].value = extract.get("fx_rate")
+
+        # ── Section 2: Beginning Balances (conditional — only if in opening_positions) ──
+        op = opening_lookup.get(ticker_upper)
+        if op:
+            summary[f"H{r}"].value = op.get("opening_book_cost")
+            summary[f"I{r}"].value = op.get("opening_quantity")
+            summary[f"J{r}"].value = op.get("opening_acb_per_share")
+
+        # ── Section 3: Net Change in Position (SUMPRODUCT formulas) ──────────
+        gl = "'Transaction Glossary'"
+        sym_match = f"({gl}!F$5:F$999=D{r})"
+        summary[f"L{r}"].value = (
+            f"=SUMPRODUCT({sym_match}*({gl}!J$5:J$999))"
+        )
+        summary[f"M{r}"].value = (
+            f"=SUMPRODUCT({sym_match}*({gl}!K$5:K$999))"
+        )
+        summary[f"N{r}"].value = (
+            f"=SUMPRODUCT({sym_match}*({gl}!E$5:E$999=\"Dividend\")*({gl}!K$5:K$999))"
+        )
+
+        # ── Section 4: Ending Balances (formulas; skip T, U, V) ──────────────
+        summary[f"P{r}"].value = f"=H{r}+M{r}"
+        summary[f"Q{r}"].value = f"=I{r}+L{r}"
+        summary[f"R{r}"].value = f"=IFERROR(P{r}/Q{r},\"\")"
+        summary[f"S{r}"].value = f"=IFERROR(INDIRECT(D{r}&\"!R4\"),\"\")"
+        # T (FMV/Unit), U (FMV Total), V (Unrealized Gain) — left for FMV build
+
+    # ── Section 5: Reconciliation block (rows 4–6, fixed positions) ──────────
+    fmv_sum_range = f"U4:U{last_data_row}"
+    summary["Y4"].value = f"=SUM({fmv_sum_range})"
+    summary["Y5"].value = "=Y4"
+    summary["Y6"].value = "=Y4+Y5"
+
+    summary["Z4"].value = extract.get("total_securities_value")
+    summary["Z5"].value = extract.get("closing_cash_balance")
+    summary["Z6"].value = extract.get("total_account_value")
+
+    for row_num in (4, 5, 6):
+        summary[f"AA{row_num}"].value = f"=Y{row_num}-Z{row_num}"
+        summary[f"AB{row_num}"].value = f'=IF(AA{row_num}=0,"✓","!")'
 
     output = io.BytesIO()
     wb.save(output)
@@ -192,8 +237,8 @@ def health():
 @app.post("/trigger")
 async def trigger_workflow(file: UploadFile = File(...)):
     """
-    Receives a PDF from the UI, forwards it to n8n, decodes the
-    base64 Excel response, and returns raw binary to the browser.
+    Receives a PDF from the UI and forwards it to the n8n webhook.
+    Acts as a CORS-safe proxy — the UI never calls n8n directly.
     """
     if not N8N_WEBHOOK_URL:
         raise HTTPException(500, "N8N_WEBHOOK_URL environment variable not set")
@@ -202,9 +247,8 @@ async def trigger_workflow(file: UploadFile = File(...)):
         raise HTTPException(400, "Only PDF files are accepted")
 
     pdf_bytes = await file.read()
-    xlsx_filename = file.filename.rsplit(".", 1)[0] + ".xlsx"
 
-    async with httpx.AsyncClient(timeout=600.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(
             N8N_WEBHOOK_URL,
             files={"Investment_Statement": (file.filename, pdf_bytes, "application/pdf")},
@@ -212,16 +256,7 @@ async def trigger_workflow(file: UploadFile = File(...)):
         if resp.status_code not in (200, 202):
             raise HTTPException(502, f"n8n webhook returned {resp.status_code}")
 
-    # n8n returns JSON with base64-encoded Excel — decode in Python
-    payload = resp.json()
-    excel_bytes = base64.b64decode(payload["data"])
-    filename = payload.get("filename", xlsx_filename)
-
-    return Response(
-        content=excel_bytes,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=\"{filename}\""}
-    )
+    return JSONResponse({"status": "received", "filename": file.filename})
 
 
 @app.post("/build-excel")
