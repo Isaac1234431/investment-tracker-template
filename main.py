@@ -192,8 +192,8 @@ def health():
 @app.post("/trigger")
 async def trigger_workflow(file: UploadFile = File(...)):
     """
-    Receives a PDF from the UI, forwards it to n8n, and streams
-    the populated Excel file back directly to the browser.
+    Receives a PDF from the UI, forwards it to n8n, decodes the
+    base64 Excel response, and returns raw binary to the browser.
     """
     if not N8N_WEBHOOK_URL:
         raise HTTPException(500, "N8N_WEBHOOK_URL environment variable not set")
@@ -212,10 +212,15 @@ async def trigger_workflow(file: UploadFile = File(...)):
         if resp.status_code not in (200, 202):
             raise HTTPException(502, f"n8n webhook returned {resp.status_code}")
 
+    # n8n returns JSON with base64-encoded Excel — decode in Python
+    payload = resp.json()
+    excel_bytes = base64.b64decode(payload["data"])
+    filename = payload.get("filename", xlsx_filename)
+
     return Response(
-        content=resp.content,
+        content=excel_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f"attachment; filename=\"{xlsx_filename}\""}
+        headers={"Content-Disposition": f"attachment; filename=\"{filename}\""}
     )
 
 
