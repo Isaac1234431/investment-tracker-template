@@ -86,6 +86,10 @@ def apply_blue_row(ws, row, cols, label=None, label_col=None):
 def build_excel(extract: dict, template_bytes: bytes) -> bytes:
     wb = load_workbook(io.BytesIO(template_bytes))
 
+    # Unwrap LlamaExtract's "data" envelope if present
+    if "data" in extract and isinstance(extract["data"], dict):
+        extract = extract["data"]
+
     holdings     = extract.get("holdings", [])
     transactions = extract.get("transactions", [])
     lookup       = build_symbol_lookup(holdings)
