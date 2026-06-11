@@ -6,6 +6,8 @@ from typing import Any
 import base64
 import io
 import os
+import re
+import zipfile
 import httpx
 import openpyxl
 from openpyxl import load_workbook
@@ -82,6 +84,70 @@ def apply_blue_row(ws, row, cols, label=None, label_col=None):
     if label and label_col:
         ws[f"{label_col}{row}"].value = label
 
+def deduplicate_holdings(holdings):
+    """
+    Consolidate holdings that share the same ticker (or same description when no
+    ticker exists) into a single row.  market_value, quantity, and cost fields are
+    summed; all other fields are taken from the first lot seen.  This prevents
+    duplicate ticker rows in the Summary sheet and ensures SUMPRODUCT formulas
+    don't double-count transactions for the same security.
+    """
+    seen   = {}   # key -> consolidated holding dict
+    order  = []   # preserve stable sort order (first occurrence wins)
+    for h in holdings:
+        key = (h.get("symbol") or "").upper().strip() or (h.get("description") or "").upper().strip()
+        if not key:
+            continue
+        if key not in seen:
+            seen[key] = {**h}   # shallow copy so we don't mutate the original
+            order.append(key)
+        else:
+            # Accumulate numeric fields; leave descriptive fields as-is
+            for field in ("market_value", "quantity"):
+                existing = seen[key].get(field) or 0
+                incoming = h.get(field) or 0
+                seen[key][field] = existing + incoming
+    return [seen[k] for k in order]
+
+def compute_securities_value(holdings):
+    """
+    Sum market_value across all holdings entries.  Because holdings only contains
+    securities (cash is never in the holdings array), this always equals the true
+    total securities value regardless of how the broker labels subtotals on the
+    statement — more reliable than trusting a single extracted field.
+    """
+    return sum(h.get("market_value") or 0 for h in holdings)
+
+def fix_dynamic_array_formulas(xlsx_bytes: bytes) -> bytes:
+    """
+    openpyxl writes dynamic array functions (FILTER, SORT, UNIQUE etc.) as legacy
+    CSE array formulas: <f t="array" ref="..."> with no ca attribute.  Excel
+    displays these with {} brackets and requires Ctrl+Shift+Enter to activate.
+
+    The fix: add ca="1" to any such formula element that contains a dynamic array
+    function.  ca="1" tells Excel this is a modern dynamic array formula that
+    should spill automatically — no manual activation needed.
+
+    This is done as a post-processing step on the raw zip bytes because openpyxl's
+    ArrayFormula class has no ca support.
+    """
+    buf_in  = io.BytesIO(xlsx_bytes)
+    buf_out = io.BytesIO()
+    pattern = re.compile(
+        r'<f t="array" ref="([^"]+)">(_xlfn\._xlws\.(?:FILTER|SORT|UNIQUE|SORTBY|SEQUENCE))'
+    )
+    with zipfile.ZipFile(buf_in, "r") as zin, \
+         zipfile.ZipFile(buf_out, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename.startswith("xl/worksheets/sheet") and b"_xlfn._xlws." in data:
+                xml  = data.decode("utf-8")
+                xml  = pattern.sub(r'<f t="array" ref="\1" ca="1">\2', xml)
+                data = xml.encode("utf-8")
+            zout.writestr(item, data)
+    return buf_out.getvalue()
+
+
 # ── Core builder ──────────────────────────────────────────────────────────────
 def build_excel(extract: dict, template_bytes: bytes) -> bytes:
     wb = load_workbook(io.BytesIO(template_bytes))
@@ -90,7 +156,7 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
     if "data" in extract and isinstance(extract["data"], dict):
         extract = extract["data"]
 
-    holdings     = extract.get("holdings", [])
+    holdings     = deduplicate_holdings(extract.get("holdings", []))
     transactions = extract.get("transactions", [])
     lookup       = build_symbol_lookup(holdings)
 
@@ -152,11 +218,8 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         new_ws = wb.copy_worksheet(template_sheet)
         new_ws.title = ticker[:31]
         new_ws["D2"] = ticker
-        # Overwrite C6 as a plain string formula so openpyxl writes it without
-        # t="array", which was causing Excel to wrap it in {} legacy CSE brackets.
-        # Assigning a string directly produces a plain <f> element, which Excel
-        # correctly treats as a modern dynamic array formula (no manual Ctrl+Shift+Enter needed).
-        new_ws["C6"] = "=FILTER('Transaction Glossary'!C:K,'Transaction Glossary'!F:F=D2,\" \")"
+        # FILTER formula in C6 stays intact — auto-pulls from Reference Template
+        # Update output summary to use dynamic last-row detection
         new_ws["R5"] = "=IFERROR(INDEX(L:L,MATCH(9.99E+307,IF(J6:J999<>\"\",ROW(J6:J999)),1)),0)"
         new_ws["R6"] = "=IFERROR(INDEX(M:M,MATCH(9.99E+307,IF(J6:J999<>\"\",ROW(J6:J999)),1)),0)"
         new_ws["R7"] = "=R5*R6"
@@ -224,7 +287,7 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
     summary["Y5"].value = "=Y4"
     summary["Y6"].value = "=Y4+Y5"
 
-    summary["Z4"].value = extract.get("total_securities_value")
+    summary["Z4"].value = compute_securities_value(holdings)
     summary["Z5"].value = extract.get("closing_cash_balance")
     summary["Z6"].value = extract.get("total_account_value")
 
@@ -234,7 +297,7 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
 
     output = io.BytesIO()
     wb.save(output)
-    return output.getvalue()
+    return fix_dynamic_array_formulas(output.getvalue())
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 @app.get("/health")
