@@ -63,6 +63,51 @@ def build_substring_lookup(holdings):
     return [(h["description"].upper().strip(), h["symbol"])
             for h in holdings if h.get("symbol") and h.get("description")]
 
+def _tokens_align(a, b):
+    """
+    Two name tokens align if they are equal, one is a prefix of the other
+    (len >= 3), or the shorter is an in-order subsequence of the longer
+    (len >= 4).  Catches broker abbreviations: MINLS->MINERALS, MTLS->METALS,
+    PHARM->PHARMACEUTICALS.
+    """
+    if a == b:
+        return True
+    s, l = (a, b) if len(a) <= len(b) else (b, a)
+    if len(s) >= 3 and l.startswith(s):
+        return True
+    if len(s) >= 4:
+        it = iter(l)
+        return all(ch in it for ch in s)
+    return False
+
+def token_match_symbol(desc_upper, substr_lookup):
+    """
+    Abbreviation-tolerant fallback: compare leading tokens of the transaction
+    description against leading tokens of each tickered holding description.
+    Guards against false positives: first token must match EXACTLY, at least
+    2 leading tokens must align, and exactly one distinct symbol may qualify
+    (multiple lots of the same ticker collapse into one candidate).
+    """
+    tokens = desc_upper.split()
+    if not tokens:
+        return ""
+    candidates = {}   # symbol -> best score
+    for h_desc, sym in substr_lookup:
+        h_tokens = h_desc.split()
+        if not h_tokens or tokens[0] != h_tokens[0]:
+            continue
+        score = 0
+        for a, b in zip(tokens, h_tokens):
+            if _tokens_align(a, b):
+                score += 1
+            else:
+                break
+        if score >= 2:
+            candidates[sym] = max(candidates.get(sym, 0), score)
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return ""
+
 def resolve_symbol(description, symbol, lookup, substr_lookup=None):
     # 1. Use the symbol LlamaExtract extracted directly from the transaction row
     if symbol:
@@ -80,6 +125,9 @@ def resolve_symbol(description, symbol, lookup, substr_lookup=None):
                    if desc_upper in holding_desc]
         if len(matches) == 1:
             return matches[0]
+        # 4. Token/abbreviation fallback — handles broker name abbreviations
+        #    (e.g. "EUPRAXIA PHARM INC" vs "EUPRAXIA PHARMACEUTICALS INC")
+        return token_match_symbol(desc_upper, substr_lookup)
     return ""
 
 def parse_date(s):
@@ -293,7 +341,7 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         if sym:
             opening_lookup[sym] = op
 
-    sorted_holdings = sorted(holdings, key=lambda x: x.get("symbol", ""))
+    sorted_holdings = sorted(holdings, key=lambda x: x.get("symbol") or "")
     last_data_row = 4 + len(sorted_holdings) - 1  # used for reconciliation SUM range
 
     for i, h in enumerate(sorted_holdings):
@@ -317,19 +365,23 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         # ── Section 3: Net Change in Position (SUMPRODUCT formulas) ──────────
         gl = "'Transaction Glossary'"
         sym_match = f"({gl}!F$5:F$999=D{r})"
+        # NOTE: all formulas guarded with IF(D="","",...) — in Excel a blank D
+        # matches every blank F cell (empty = empty is TRUE), which made each
+        # no-ticker Summary row sum ALL symbol-less transactions.
+        blank_guard = f"$D{r}=\"\""
         summary[f"L{r}"].value = (
-            f"=SUMPRODUCT({sym_match}*({gl}!J$5:J$999))"
+            f"=IF({blank_guard},\"\",SUMPRODUCT({sym_match}*({gl}!J$5:J$999)))"
         )
         summary[f"M{r}"].value = (
-            f"=SUMPRODUCT({sym_match}*({gl}!K$5:K$999))"
+            f"=IF({blank_guard},\"\",SUMPRODUCT({sym_match}*({gl}!K$5:K$999)))"
         )
         summary[f"N{r}"].value = (
-            f"=SUMPRODUCT({sym_match}*({gl}!E$5:E$999=\"Dividend\")*({gl}!K$5:K$999))"
+            f"=IF({blank_guard},\"\",SUMPRODUCT({sym_match}*({gl}!E$5:E$999=\"Dividend\")*({gl}!K$5:K$999)))"
         )
 
         # ── Section 4: Ending Balances (formulas; skip T, U, V) ──────────────
-        summary[f"P{r}"].value = f"=H{r}+M{r}"
-        summary[f"Q{r}"].value = f"=I{r}+L{r}"
+        summary[f"P{r}"].value = f"=IF({blank_guard},\"\",H{r}+M{r})"
+        summary[f"Q{r}"].value = f"=IF({blank_guard},\"\",I{r}+L{r})"
         summary[f"R{r}"].value = f"=IFERROR(P{r}/Q{r},\"\")"
         summary[f"S{r}"].value = f"=IFERROR(INDIRECT(D{r}&\"!R4\"),\"\")"
         # T (FMV/Unit), U (FMV Total), V (Unrealized Gain) — left for FMV build
