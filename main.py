@@ -156,7 +156,7 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         # t="array", which was causing Excel to wrap it in {} legacy CSE brackets.
         # Assigning a string directly produces a plain <f> element, which Excel
         # correctly treats as a modern dynamic array formula (no manual Ctrl+Shift+Enter needed).
-        new_ws["C6"] = "=_xlfn._xlws.FILTER('Transaction Glossary'!C:K,'Transaction Glossary'!F:F=D2,\" \")"
+        new_ws["C6"] = "=FILTER('Transaction Glossary'!C:K,'Transaction Glossary'!F:F=D2,\" \")"
         new_ws["R5"] = "=IFERROR(INDEX(L:L,MATCH(9.99E+307,IF(J6:J999<>\"\",ROW(J6:J999)),1)),0)"
         new_ws["R6"] = "=IFERROR(INDEX(M:M,MATCH(9.99E+307,IF(J6:J999<>\"\",ROW(J6:J999)),1)),0)"
         new_ws["R7"] = "=R5*R6"
