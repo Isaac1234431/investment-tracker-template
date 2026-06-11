@@ -120,29 +120,56 @@ def compute_securities_value(holdings):
 
 def fix_dynamic_array_formulas(xlsx_bytes: bytes) -> bytes:
     """
-    openpyxl writes dynamic array functions (FILTER, SORT, UNIQUE etc.) as legacy
-    CSE array formulas: <f t="array" ref="..."> with no ca attribute.  Excel
-    displays these with {} brackets and requires Ctrl+Shift+Enter to activate.
+    openpyxl strips two things that Excel 365 needs to treat FILTER/SORT/UNIQUE
+    as modern dynamic array formulas rather than legacy CSE ({}) formulas:
 
-    The fix: add ca="1" to any such formula element that contains a dynamic array
-    function.  ca="1" tells Excel this is a modern dynamic array formula that
-    should spill automatically — no manual activation needed.
+    1. ca="1" attribute on the <f> element — signals dynamic array spill behaviour.
+       openpyxl's ArrayFormula writes t="array" but never adds ca="1".
 
-    This is done as a post-processing step on the raw zip bytes because openpyxl's
-    ArrayFormula class has no ca support.
+    2. The xcalcf:calcFeatures extLst block in workbook.xml — without this,
+       Excel 365 ignores ca="1" entirely and falls back to {} CSE mode.
+
+    Both are injected here as a post-processing step on the raw xlsx zip bytes,
+    since openpyxl has no API to set either.
     """
+    # Feature declarations copied verbatim from a file saved by Excel 365
+    CALC_FEATURES_EXTLST = (
+        '<extLst>'
+        '<ext uri="{140A7094-0E35-4892-8432-C4D2E57EDEB5}" '
+        'xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main">'
+        '<x15:workbookPr chartTrackingRefBase="1"/></ext>'
+        '<ext uri="{B58B0392-4F1F-4190-BB64-5DF3571DCE5F}" '
+        'xmlns:xcalcf="http://schemas.microsoft.com/office/spreadsheetml/2018/calcfeatures">'
+        '<xcalcf:calcFeatures>'
+        '<xcalcf:feature name="microsoft.com:RD"/>'
+        '<xcalcf:feature name="microsoft.com:Single"/>'
+        '<xcalcf:feature name="microsoft.com:FV"/>'
+        '<xcalcf:feature name="microsoft.com:CNMTM"/>'
+        '<xcalcf:feature name="microsoft.com:LET_WF"/>'
+        '<xcalcf:feature name="microsoft.com:LAMBDA_WF"/>'
+        '<xcalcf:feature name="microsoft.com:ARRAYTEXT_WF"/>'
+        '</xcalcf:calcFeatures></ext>'
+        '</extLst>'
+    )
     buf_in  = io.BytesIO(xlsx_bytes)
     buf_out = io.BytesIO()
-    pattern = re.compile(
+    ca_pattern = re.compile(
         r'<f t="array" ref="([^"]+)">(_xlfn\._xlws\.(?:FILTER|SORT|UNIQUE|SORTBY|SEQUENCE))'
     )
     with zipfile.ZipFile(buf_in, "r") as zin, \
          zipfile.ZipFile(buf_out, "w", compression=zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
             data = zin.read(item.filename)
+            # Fix 1: add ca="1" to dynamic array formulas in each worksheet
             if item.filename.startswith("xl/worksheets/sheet") and b"_xlfn._xlws." in data:
                 xml  = data.decode("utf-8")
-                xml  = pattern.sub(r'<f t="array" ref="\1" ca="1">\2', xml)
+                xml  = ca_pattern.sub(r'<f t="array" ref="\1" ca="1">\2', xml)
+                data = xml.encode("utf-8")
+            # Fix 2: inject calcFeatures into workbook.xml so Excel honours ca="1"
+            if item.filename == "xl/workbook.xml":
+                xml = data.decode("utf-8")
+                if "xcalcf:calcFeatures" not in xml:
+                    xml = xml.replace("</workbook>", CALC_FEATURES_EXTLST + "</workbook>")
                 data = xml.encode("utf-8")
             zout.writestr(item, data)
     return buf_out.getvalue()
