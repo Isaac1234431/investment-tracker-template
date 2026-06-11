@@ -53,9 +53,34 @@ def build_symbol_lookup(holdings):
     return {h["description"].upper().strip(): h["symbol"]
             for h in holdings if h.get("symbol") and h.get("description")}
 
-def resolve_symbol(description, symbol, lookup):
-    if symbol: return symbol
-    return lookup.get((description or "").upper().strip(), "")
+def build_substring_lookup(holdings):
+    """
+    List of (holding_description_upper, symbol) pairs for holdings that have a
+    symbol.  Used as a fallback when a transaction description has no exact match
+    — e.g. 'STACK CAP GROUP INC' (sold common shares) matching against
+    'WT-STACK CAP GROUP INC 31MAR28' (warrant still held at period end).
+    """
+    return [(h["description"].upper().strip(), h["symbol"])
+            for h in holdings if h.get("symbol") and h.get("description")]
+
+def resolve_symbol(description, symbol, lookup, substr_lookup=None):
+    # 1. Use the symbol LlamaExtract extracted directly from the transaction row
+    if symbol:
+        return symbol
+    desc_upper = (description or "").upper().strip()
+    # 2. Exact match against holdings descriptions
+    if desc_upper in lookup:
+        return lookup[desc_upper]
+    # 3. Substring fallback — transaction description contained within a holding
+    #    description (e.g. common share name inside a warrant name).
+    #    Only attempt when description is long enough to be specific (>= 10 chars)
+    #    and only accept an unambiguous single match to avoid wrong assignments.
+    if substr_lookup and len(desc_upper) >= 10:
+        matches = [sym for (holding_desc, sym) in substr_lookup
+                   if desc_upper in holding_desc]
+        if len(matches) == 1:
+            return matches[0]
+    return ""
 
 def parse_date(s):
     if not s: return None
@@ -185,7 +210,8 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
 
     holdings     = deduplicate_holdings(extract.get("holdings", []))
     transactions = extract.get("transactions", [])
-    lookup       = build_symbol_lookup(holdings)
+    lookup        = build_symbol_lookup(holdings)
+    substr_lookup = build_substring_lookup(holdings)
 
     # Normalize all trans_type values
     for t in transactions:
@@ -205,7 +231,7 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         r = conf_start + i
         set_date(ref[f"D{r}"], parse_date(t.get("date")))
         ref[f"E{r}"].value = t.get("trans_type", "")
-        ref[f"F{r}"].value = resolve_symbol(t.get("description"), t.get("symbol"), lookup)
+        ref[f"F{r}"].value = resolve_symbol(t.get("description"), t.get("symbol"), lookup, substr_lookup)
         ref[f"G{r}"].value = t.get("description", "")
         ref[f"H{r}"].value = t.get("currency", "")
         ref[f"I{r}"].value = t.get("price_per_share")
@@ -223,7 +249,7 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         ref[f"C{r}"].value = "Pending"
         set_date(ref[f"D{r}"], parse_date(t.get("date")))
         ref[f"E{r}"].value = t.get("trans_type", "")
-        ref[f"F{r}"].value = resolve_symbol(t.get("description"), t.get("symbol"), lookup)
+        ref[f"F{r}"].value = resolve_symbol(t.get("description"), t.get("symbol"), lookup, substr_lookup)
         ref[f"G{r}"].value = t.get("description", "")
         ref[f"H{r}"].value = t.get("currency", "")
         ref[f"I{r}"].value = t.get("price_per_share")
@@ -235,10 +261,10 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
     template_sheet = wb["Individual Stock Template"]
 
     tickers = sorted(set(
-        resolve_symbol(t.get("description",""), t.get("symbol"), lookup)
+        resolve_symbol(t.get("description",""), t.get("symbol"), lookup, substr_lookup)
         for t in transactions
         if t.get("trans_type","").lower() in ("buy","sell")
-        and resolve_symbol(t.get("description",""), t.get("symbol"), lookup)
+        and resolve_symbol(t.get("description",""), t.get("symbol"), lookup, substr_lookup)
     ))
 
     for ticker in tickers:
