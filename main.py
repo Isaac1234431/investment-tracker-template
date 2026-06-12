@@ -267,6 +267,8 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         new_ws = wb.copy_worksheet(template_sheet)
         new_ws.title = ticker[:31]
         new_ws["D2"] = ticker
+        new_ws["L5"] = '=IFERROR(INDEX(Summary!$I$4:$I$10000,MATCH($D$2,Summary!$D$4:$D$10000,0)),0)'
+        new_ws["M5"] = '=IFERROR(INDEX(Summary!$J$4:$J$10000,MATCH($D$2,Summary!$D$4:$D$10000,0)),0)'
         # All other formulas (C6 FILTER, R4/R5/R6/R7 outputs) are intentionally
         # NOT overwritten — copy_worksheet() copies them correctly from the template,
         # so any formula updates made directly in Investment_Tracking_V3.xlsx are
