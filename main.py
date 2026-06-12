@@ -256,6 +256,8 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
     # ── 2. Individual stock tabs ─────────────────────────────────────────────
     template_sheet = wb["Individual Stock Template"]
 
+    # Pass 1: symbol-keyed tabs — Buy or Sell transactions with a resolved symbol.
+    # D2 = ticker, FILTER formula matches on col F (symbol).
     tickers = sorted(set(
         resolve_symbol(t.get("description",""), t.get("symbol"), lookup)
         for t in transactions
@@ -267,12 +269,43 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         new_ws = wb.copy_worksheet(template_sheet)
         new_ws.title = ticker[:31]
         new_ws["D2"] = ticker
-        new_ws["L5"] = '=IFERROR(INDEX(Summary!$I$4:$I$10000,MATCH($D$2,Summary!$D$4:$D$10000,0)),0)'
-        new_ws["M5"] = '=IFERROR(INDEX(Summary!$J$4:$J$10000,MATCH($D$2,Summary!$D$4:$D$10000,0)),0)'
         # All other formulas (C6 FILTER, R4/R5/R6/R7 outputs) are intentionally
         # NOT overwritten — copy_worksheet() copies them correctly from the template,
         # so any formula updates made directly in Investment_Tracking_V3.xlsx are
         # automatically picked up without needing a main.py change.
+
+    # Pass 2: description-keyed tabs — Sell or Transfer transactions with no
+    # resolved symbol. These are securities fully closed during the period (fully
+    # sold off or transferred out) that don't appear in end-of-period holdings,
+    # so no symbol is available. One tab per unique description.
+    # D2 = description, FILTER formula matches on col G (description) instead of
+    # col F (symbol) since col F is blank for these transactions.
+    desc_tabs = sorted(set(
+        t.get("description","").strip()
+        for t in transactions
+        if t.get("trans_type","").lower() in ("sell","transfer")
+        and not resolve_symbol(t.get("description",""), t.get("symbol"), lookup)
+        and t.get("description","").strip()
+    ))
+
+    for desc in desc_tabs:
+        tab_title = desc[:31]
+        # Avoid collision with an existing symbol-keyed tab
+        if tab_title in wb.sheetnames:
+            continue
+        new_ws = wb.copy_worksheet(template_sheet)
+        new_ws.title = tab_title
+        new_ws["D2"] = desc
+        # Override C6 FILTER to match on col G (description) instead of col F (symbol)
+        new_ws["C6"] = (
+            "=_xlfn._xlws.FILTER('Transaction Glossary'!C:K,"
+            "'Transaction Glossary'!G:G=D2," ")"
+        )
+        # Highlight C2:D2 orange to signal this is a description-keyed tab
+        # (no symbol available — matched on transaction description instead)
+        _orange = PatternFill("solid", fgColor="FFFFC000")
+        new_ws["C2"].fill = _orange
+        new_ws["D2"].fill = _orange
 
     # Re-order sheets alphabetically
     fixed = ["Summary", "Transaction Glossary", "Individual Stock Template"]
