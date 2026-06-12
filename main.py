@@ -269,6 +269,12 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         new_ws = wb.copy_worksheet(template_sheet)
         new_ws.title = ticker[:31]
         new_ws["D2"] = ticker
+        # L5/M5: beginning shares and ACB pulled from Summary via MATCH on ticker.
+        # Written explicitly so they are always present regardless of template version.
+        new_ws["L5"] = ("=IFERROR(INDEX(Summary!$I$4:$I$10000,"
+                        "MATCH($D$2,Summary!$D$4:$D$10000,0)),0)")
+        new_ws["M5"] = ("=IFERROR(INDEX(Summary!$J$4:$J$10000,"
+                        "MATCH($D$2,Summary!$D$4:$D$10000,0)),0)")
         # All other formulas (C6 FILTER, R4/R5/R6/R7 outputs) are intentionally
         # NOT overwritten — copy_worksheet() copies them correctly from the template,
         # so any formula updates made directly in Investment_Tracking_V3.xlsx are
@@ -298,16 +304,26 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         new_ws = wb.copy_worksheet(template_sheet)
         new_ws.title = tab_title
         new_ws["D2"] = desc
-        # Override C6 FILTER to match on col G (description) instead of col F (symbol)
-        new_ws["C6"] = (
+        # Override C6 FILTER to match on col G (description) instead of col F (symbol).
+        # Use ArrayFormula so openpyxl writes t="array" -> {} brackets in Excel,
+        # consistent with the symbol-keyed tabs copied from the template.
+        new_ws["C6"] = ArrayFormula(
+            "C6",
             "=_xlfn._xlws.FILTER('Transaction Glossary'!C:K,"
-            "'Transaction Glossary'!G:G=D2," ")"
+            "'Transaction Glossary'!G:G=D2,\" \")"
         )
         # Highlight C2:D2 orange to signal this is a description-keyed tab
         # (no symbol available — matched on transaction description instead)
         _orange = PatternFill("solid", fgColor="FFFFC000")
         new_ws["C2"].fill = _orange
         new_ws["D2"].fill = _orange
+        # L5/M5: for desc-keyed tabs D2 holds a description not a ticker,
+        # so MATCH against Summary col D returns no match -> IFERROR returns 0.
+        # Beginning balances must be entered manually for these tabs.
+        new_ws["L5"] = ("=IFERROR(INDEX(Summary!$I$4:$I$10000,"
+                        "MATCH($D$2,Summary!$D$4:$D$10000,0)),0)")
+        new_ws["M5"] = ("=IFERROR(INDEX(Summary!$J$4:$J$10000,"
+                        "MATCH($D$2,Summary!$D$4:$D$10000,0)),0)")
 
     # Re-order sheets alphabetically
     fixed = ["Summary", "Transaction Glossary", "Individual Stock Template"]
