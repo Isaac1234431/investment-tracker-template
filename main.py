@@ -302,12 +302,22 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         summary[f"E{r}"].value = h.get("currency", "")
         summary[f"F{r}"].value = extract.get("fx_rate")
 
-        # ── Section 2: Beginning Balances (conditional — only if in opening_positions) ──
+        # ── Section 2: Beginning Balances ────────────────────────────────────────
+        # Priority 1: explicit opening_positions from broker (beginning-of-period data)
+        # Priority 2: cost fields from end-of-period holdings (book_value, cost_per_unit)
+        # If neither provides a value, the cell stays blank — manual entry required.
         op = opening_lookup.get(ticker_upper)
         if op:
-            summary[f"H{r}"].value = op.get("opening_book_cost")
-            summary[f"I{r}"].value = op.get("opening_quantity")
-            summary[f"J{r}"].value = op.get("opening_acb_per_share")
+            h_val = op.get("opening_book_cost")
+            i_val = op.get("opening_quantity")
+            j_val = op.get("opening_acb_per_share")
+        else:
+            h_val = h.get("book_value")
+            i_val = h.get("quantity")
+            j_val = h.get("cost_per_unit")
+        if h_val is not None: summary[f"H{r}"].value = h_val
+        if i_val is not None: summary[f"I{r}"].value = i_val
+        if j_val is not None: summary[f"J{r}"].value = j_val
 
         # ── Section 3: Net Change in Position (SUMPRODUCT formulas) ──────────
         gl = "'Transaction Glossary'"
