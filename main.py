@@ -188,7 +188,24 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
     if "data" in extract and isinstance(extract["data"], dict):
         extract = extract["data"]
 
-    holdings     = deduplicate_holdings(extract.get("holdings", []))
+    # Strip cash entries that some brokers (e.g. National Bank) include in the
+    # holdings array alongside real securities. A holding is treated as cash if
+    # it has no symbol AND either:
+    #   (a) its description contains "CASH", or
+    #   (b) its market_value exactly matches the known closing_cash_balance.
+    # Both signals are gated on no-symbol to avoid incorrectly removing listed
+    # securities whose names happen to contain the word "cash" (e.g. CASH ETF).
+    _cash_bal = extract.get("closing_cash_balance") or 0
+    raw_holdings = [
+        h for h in extract.get("holdings", [])
+        if not (
+            not h.get("symbol") and (
+                "CASH" in (h.get("description") or "").upper() or
+                (_cash_bal and h.get("market_value") == _cash_bal)
+            )
+        )
+    ]
+    holdings     = deduplicate_holdings(raw_holdings)
     transactions = extract.get("transactions", [])
     lookup        = build_symbol_lookup(holdings)
 
