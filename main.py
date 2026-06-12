@@ -289,7 +289,9 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
     ))
 
     for desc in desc_tabs:
-        tab_title = desc[:31]
+        # Strip characters Excel does not allow in sheet names
+        tab_title = desc.translate(str.maketrans("", "", r'*/?\\[]:'))
+        tab_title = tab_title.strip()[:31]
         # Avoid collision with an existing symbol-keyed tab
         if tab_title in wb.sheetnames:
             continue
