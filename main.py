@@ -250,11 +250,10 @@ def build_excel(extract: dict, template_bytes: bytes) -> bytes:
         new_ws = wb.copy_worksheet(template_sheet)
         new_ws.title = ticker[:31]
         new_ws["D2"] = ticker
-        # FILTER formula in C6 stays intact — auto-pulls from Reference Template
-        # Update output summary to use dynamic last-row detection
-        new_ws["R5"] = "=IFERROR(INDEX(L:L,MATCH(9.99E+307,IF(J6:J999<>\"\",ROW(J6:J999)),1)),0)"
-        new_ws["R6"] = "=IFERROR(INDEX(M:M,MATCH(9.99E+307,IF(J6:J999<>\"\",ROW(J6:J999)),1)),0)"
-        new_ws["R7"] = "=R5*R6"
+        # All other formulas (C6 FILTER, R4/R5/R6/R7 outputs) are intentionally
+        # NOT overwritten — copy_worksheet() copies them correctly from the template,
+        # so any formula updates made directly in Investment_Tracking_V3.xlsx are
+        # automatically picked up without needing a main.py change.
 
     # Re-order sheets alphabetically
     fixed = ["Summary", "Transaction Glossary", "Individual Stock Template"]
